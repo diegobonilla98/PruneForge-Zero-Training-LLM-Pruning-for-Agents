@@ -1,0 +1,100 @@
+What is the difference between artificial intelligence, machine learning, and deep learning?
+What is a neural network, in plain terms?
+What is a parameter in a neural network?
+What is a weight vs a bias?
+What is an activation function and why do we need it?
+What is the difference between linear and non-linear models?
+What is a layer in a neural network?
+What is the input layer, hidden layer, and output layer?
+What is forward propagation?
+What is a loss function?
+What does it mean to "train" a neural network?
+What is gradient descent?
+What is backpropagation at a high level?
+What is a learning rate?
+What is a batch, mini-batch, and epoch?
+What is the difference between training, validation, and test sets?
+What is overfitting and how can you recognize it?
+What is underfitting and how can you recognize it?
+What is generalization?
+What is the difference between regression and classification?
+What is the purpose of normalization or standardization of inputs?
+What is one-hot encoding and when do you need it?
+What is the softmax function used for?
+What is cross-entropy loss and why is it common for classification?
+What is mean squared error and when is it appropriate?
+What is the difference between sigmoid, tanh, and ReLU?
+Why can sigmoid and tanh cause vanishing gradients?
+What is the vanishing gradient problem?
+What is the exploding gradient problem?
+What is gradient clipping and when do you use it?
+What is weight initialization and why does it matter?
+What are Xavier and He initialization and when do you choose each?
+What is the difference between SGD, Momentum, and Nesterov Momentum?
+What is Adam and why is it popular?
+What are AdamW and decoupled weight decay?
+What is weight decay and how is it different from L2 regularization in practice?
+What is dropout and why does it help?
+What is early stopping and how do you set it up?
+What is data augmentation and why is it especially useful in vision?
+What metrics besides loss should you track for classification tasks?
+What is a confusion matrix and how do you read it?
+What is precision, recall, and F1 score?
+What is ROC-AUC and when is it misleading?
+What is calibration in classification models?
+What is class imbalance and how can you address it?
+What is label smoothing and why might it help?
+What is batch normalization and what problem does it address?
+What is the difference between batch norm, layer norm, and group norm?
+Why does batch size affect training dynamics?
+What is learning rate scheduling and why use it?
+What is a warmup schedule?
+What is cosine annealing?
+What is cyclical learning rate?
+What is mixed precision training and why does it speed things up?
+What is gradient accumulation and when is it needed?
+What is checkpointing and why is it important?
+What is reproducibility in deep learning experiments and what breaks it?
+What is the difference between deterministic and stochastic training?
+What is hyperparameter tuning and what are common strategies?
+What is cross-validation and when is it practical in deep learning?
+What is a convolution and why is it useful for images?
+What is the difference between a CNN and an MLP for image tasks?
+What are padding, stride, and dilation in convolutions?
+What is max pooling vs average pooling?
+What is a receptive field and how does it grow with depth?
+What are residual connections and why do they help?
+What is the intuition behind ResNet?
+What is a bottleneck block?
+What is depthwise separable convolution and what does it buy you?
+What is a U-Net and when do you use it?
+What is semantic segmentation vs instance segmentation?
+What is object detection vs segmentation?
+What are anchors and why do anchor-free methods exist?
+What is non-maximum suppression?
+What is the difference between mAP and IoU metrics?
+What is transfer learning and why does it work well?
+When should you freeze layers vs fine-tune all layers?
+What is domain shift and how does it show up in vision models?
+What is test-time augmentation and when is it worth it?
+What is knowledge distillation?
+What is an RNN and what problem was it designed to solve?
+What is an LSTM vs a GRU?
+Why do RNNs struggle with long-range dependencies?
+What is attention and why was it a breakthrough?
+What is self-attention vs cross-attention?
+What is a Transformer encoder vs decoder?
+What is positional encoding and why is it needed?
+What is the difference between absolute and relative positional embeddings?
+What is teacher forcing in sequence models?
+What is exposure bias and why does it matter in generation?
+What is the scaling law idea in deep learning?
+What is the bias-variance tradeoff in neural networks, if it still applies?
+What is double descent and when do you see it?
+What is the lottery ticket hypothesis?
+What is mode collapse in GANs and how can you mitigate it?
+What is a diffusion model and how does it differ from GANs?
+What is score matching and its connection to diffusion models?
+What is contrastive learning and what makes it work?
+What is self-supervised learning and why is it useful?
+What are the main bottlenecks in training very large models: data, compute, memory, or optimization?
