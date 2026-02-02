@@ -14,6 +14,14 @@ Given a base model and a calibration set of prompts:
 
 The search is stochastic-greedy with memory: it prioritizes candidates that historically cause the smallest quality drops, while occasionally exploring other options.
 
+## How this differs from ablation, pruning, and distillation
+
+PruneForge is not a classic ablation study, nor standard fine-tuning-based pruning or distillation:
+
+- **Not ablation-by-removal:** Ablation studies typically remove or disable components to measure importance, but they do not attempt to preserve task outputs under a quality constraint. PruneForge uses ablation-like probes as part of a guided search that must keep semantic similarity above a threshold.
+- **No retraining or distillation:** Traditional pruning and distillation often retrain, fine-tune, or distill a student model to recover quality. PruneForge keeps weights fixed and never trains; it relies on structured removal plus embedding-based acceptance tests.
+- **Task-targeted compression:** Instead of optimizing for general-purpose accuracy, it compresses the model for a specific prompt set and similarity metric, producing a recipe that captures only the task-relevant subspace.
+
 ## What it prunes
 
 - MLP width (drop channels)
