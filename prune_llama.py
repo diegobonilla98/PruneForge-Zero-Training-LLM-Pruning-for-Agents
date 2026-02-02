@@ -1,3 +1,5 @@
+"""Pruning utilities for Llama-family models with embedding-based scoring."""
+
 import argparse
 import gc
 import json
@@ -16,6 +18,7 @@ from torch import Tensor
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 
+# ---- Global pruning defaults ----
 SEQ_LEN = 256
 GEN_BATCH_MULTIPLIER = 2
 EMBED_BATCH_MULTIPLIER = 2
@@ -23,6 +26,8 @@ DEBUG_LOG_ENABLED = True
 DEBUG_LOG_PATH = "pruning_debug.jsonl"
 AUTO_SAVE_RECIPE = True
 DEFAULT_RECIPE_PATH = "pruning_recipe.json"
+
+# ---- Adaptive threshold tuning ----
 TAU_DECAY = 0.94
 TAU_FLOOR_REL = 0.50
 STAGE_MAX_ITERS = 30
@@ -41,6 +46,7 @@ ADAPT_HEADROOM_WEIGHT = 0.8
 
 
 def log_event(event: Dict[str, object]) -> None:
+    """Persist a structured debug event if logging is enabled."""
     if not DEBUG_LOG_ENABLED:
         return
     payload = dict(event)
@@ -50,6 +56,7 @@ def log_event(event: Dict[str, object]) -> None:
 
 
 def set_seed(seed: int) -> None:
+    """Seed Python and torch RNGs for reproducibility."""
     random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -57,11 +64,13 @@ def set_seed(seed: int) -> None:
 
 
 def read_text(path: str) -> str:
+    """Read a text file and strip trailing whitespace."""
     with open(path, "r", encoding="utf-8") as f:
         return f.read().strip()
 
 
 def read_lines(path: str) -> List[str]:
+    """Read a text file into a list of non-empty, stripped lines."""
     lines: List[str] = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -72,11 +81,13 @@ def read_lines(path: str) -> List[str]:
 
 
 def batched(items: Sequence[str], batch_size: int) -> Iterable[List[str]]:
+    """Yield list batches from a sequence."""
     for i in range(0, len(items), batch_size):
         yield list(items[i : i + batch_size])
 
 
 def last_token_pool(last_hidden_states: Tensor, attention_mask: Tensor) -> Tensor:
+    """Pool the final token embedding, handling left vs. right padding."""
     left_padding = attention_mask[:, -1].sum() == attention_mask.shape[0]
     if left_padding:
         return last_hidden_states[:, -1]
@@ -88,10 +99,12 @@ def last_token_pool(last_hidden_states: Tensor, attention_mask: Tensor) -> Tenso
 
 
 def get_detailed_instruct(task_description: str, query: str) -> str:
+    """Build the instruction-tuned query format for embedding models."""
     return f"Instruct: {task_description}\nQuery:{query}"
 
 
 def normalize_text(text: str) -> str:
+    """Normalize model output for comparison."""
     text = text.strip()
     text = re.sub(r"```[\w]*\n?", "", text)
     text = re.sub(r"\s+", " ", text)
@@ -99,6 +112,7 @@ def normalize_text(text: str) -> str:
 
 
 def get_decoder_layers(model: torch.nn.Module) -> torch.nn.ModuleList:
+    """Return a model's decoder layer list for Llama-style architectures."""
     if hasattr(model, "model") and hasattr(model.model, "layers"):
         return model.model.layers
     if hasattr(model, "layers"):
@@ -107,6 +121,7 @@ def get_decoder_layers(model: torch.nn.Module) -> torch.nn.ModuleList:
 
 
 def reset_layer_indices(model: torch.nn.Module) -> None:
+    """Recompute layer indices after pruning or layer surgery."""
     layers = get_decoder_layers(model)
     for idx, layer in enumerate(layers):
         if hasattr(layer, "layer_idx"):
@@ -116,6 +131,7 @@ def reset_layer_indices(model: torch.nn.Module) -> None:
 
 
 def ensure_pad_token(tokenizer: AutoTokenizer) -> None:
+    """Ensure tokenizer has a padding token for batch generation."""
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -123,6 +139,7 @@ def ensure_pad_token(tokenizer: AutoTokenizer) -> None:
 def build_prompt(
     tokenizer: AutoTokenizer, system_prompt: str, user_text: str
 ) -> str:
+    """Build a chat-style prompt that matches the tokenizer template."""
     if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
         messages = [
             {"role": "system", "content": system_prompt},
@@ -135,6 +152,8 @@ def build_prompt(
 
 
 class LlamaGenerator:
+    """Wrapper for text generation using a causal Llama-style model."""
+
     def __init__(
         self,
         model_name: str,
@@ -228,6 +247,8 @@ class LlamaGenerator:
 
 
 class EmbeddingScorer:
+    """Embeds text with a dedicated embedding model and computes similarity."""
+
     def __init__(
         self,
         model_name: str,
@@ -272,7 +293,9 @@ class EmbeddingScorer:
             )
             batch = {k: v.to(self.device) for k, v in batch.items()}
             outputs = self.model(**batch)
-            embeddings = last_token_pool(outputs.last_hidden_state, batch["attention_mask"])
+            embeddings = last_token_pool(
+                outputs.last_hidden_state, batch["attention_mask"]
+            )
             embeddings = F.normalize(embeddings, p=2, dim=1)
             all_embs.append(embeddings.detach().cpu())
         return torch.cat(all_embs, dim=0)
@@ -287,7 +310,10 @@ class EmbeddingScorer:
         scores = (a_emb * b_emb).sum(dim=1)
         return scores.mean().item()
 
+
 class StatsCollector:
+    """Collects activation statistics needed for pruning decisions."""
+
     def __init__(self, model: torch.nn.Module) -> None:
         self.model = model
         self.mlp_sum_abs: Dict[int, Tensor] = {}
@@ -329,9 +355,13 @@ class StatsCollector:
         config = self.model.config
         attn = layer.self_attn
         num_heads_val = getattr(attn, "num_heads", None) or config.num_attention_heads
-        head_dim_val = getattr(attn, "head_dim", None) or (config.hidden_size // num_heads_val)
+        head_dim_val = getattr(attn, "head_dim", None) or (
+            config.hidden_size // num_heads_val
+        )
 
-        def hook(_module, inputs, _output, num_heads=num_heads_val, head_dim=head_dim_val):
+        def hook(
+            _module, inputs, _output, num_heads=num_heads_val, head_dim=head_dim_val
+        ):
             with torch.no_grad():
                 h = inputs[0].detach().float()
                 if h.dim() != 3:
@@ -387,7 +417,9 @@ class StatsCollector:
             handle.remove()
         self.handles = []
 
-    def compute_importances(self) -> Tuple[Dict[int, Tensor], Dict[int, Tensor], Dict[int, float]]:
+    def compute_importances(
+        self,
+    ) -> Tuple[Dict[int, Tensor], Dict[int, Tensor], Dict[int, float]]:
         mlp_importance: Dict[int, Tensor] = {}
         head_importance: Dict[int, Tensor] = {}
         layer_importance: Dict[int, float] = {}
@@ -414,6 +446,7 @@ class StatsCollector:
 def collect_importances(
     generator: LlamaGenerator, texts: Sequence[str], desc: str = "Collecting stats"
 ) -> Tuple[Dict[int, Tensor], Dict[int, Tensor], Dict[int, float]]:
+    """Collect MLP/head/layer importances for the current model state."""
     collector = StatsCollector(generator.model)
     collector.register()
     generator.forward_for_stats_texts(texts, max_length=SEQ_LEN, desc=desc)
@@ -427,6 +460,7 @@ def remap_importances_to_orig(
     layer_imp: Dict[int, float],
     layer_orig_indices: List[int],
 ) -> Tuple[Dict[int, Tensor], Dict[int, Tensor], Dict[int, float]]:
+    """Map current layer importances to original layer indices."""
     remapped_mlp: Dict[int, Tensor] = {}
     remapped_head: Dict[int, Tensor] = {}
     remapped_layer: Dict[int, float] = {}
@@ -474,8 +508,12 @@ class ModelState:
             mlp_orig_indices_by_layer[idx] = list(range(d_ff))
             attn = layer.self_attn
             num_heads = getattr(attn, "num_heads", None) or config.num_attention_heads
-            num_kv_heads = getattr(attn, "num_key_value_heads", None) or getattr(config, "num_key_value_heads", num_heads)
-            head_dim = getattr(attn, "head_dim", None) or (config.hidden_size // num_heads)
+            num_kv_heads = getattr(attn, "num_key_value_heads", None) or getattr(
+                config, "num_key_value_heads", num_heads
+            )
+            head_dim = getattr(attn, "head_dim", None) or (
+                config.hidden_size // num_heads
+            )
             group_size = num_heads // max(num_kv_heads, 1)
             head_map_by_layer[idx] = HeadMap(
                 query_head_orig_indices=list(range(num_heads)),
@@ -519,6 +557,7 @@ class SurgeryUndo:
 def replace_linear(
     old_linear: torch.nn.Linear, new_weight: Tensor, new_bias: Optional[Tensor]
 ) -> torch.nn.Linear:
+    """Create a Linear module with new weights that matches dtype/device."""
     new_linear = torch.nn.Linear(
         new_weight.shape[1],
         new_weight.shape[0],
@@ -539,6 +578,7 @@ def apply_mlp_prune(
     keep_positions: List[int],
     keep_orig_indices: List[int],
 ) -> SurgeryUndo:
+    """Prune MLP hidden units for a single layer and return an undo handle."""
     layers = get_decoder_layers(model)
     current_idx = state.layer_orig_indices.index(layer_orig_idx)
     layer = layers[current_idx]
@@ -552,8 +592,16 @@ def apply_mlp_prune(
         gate_w = old_gate.weight[keep_positions, :].detach().clone()
         up_w = old_up.weight[keep_positions, :].detach().clone()
         down_w = old_down.weight[:, keep_positions].detach().clone()
-        gate_b = old_gate.bias[keep_positions].detach().clone() if old_gate.bias is not None else None
-        up_b = old_up.bias[keep_positions].detach().clone() if old_up.bias is not None else None
+        gate_b = (
+            old_gate.bias[keep_positions].detach().clone()
+            if old_gate.bias is not None
+            else None
+        )
+        up_b = (
+            old_up.bias[keep_positions].detach().clone()
+            if old_up.bias is not None
+            else None
+        )
         down_b = old_down.bias.detach().clone() if old_down.bias is not None else None
 
     layer.mlp.gate_proj = replace_linear(old_gate, gate_w, gate_b)
@@ -575,6 +623,7 @@ def apply_head_prune(
     layer_orig_idx: int,
     remove_group_orig_idx: int,
 ) -> SurgeryUndo:
+    """Remove a key-value head group from a layer and return an undo handle."""
     layers = get_decoder_layers(model)
     current_idx = state.layer_orig_indices.index(layer_orig_idx)
     layer = layers[current_idx]
@@ -586,8 +635,12 @@ def apply_head_prune(
     old_v = attn.v_proj
     old_o = attn.o_proj
     old_num_heads = getattr(attn, "num_heads", None) or config.num_attention_heads
-    old_num_kv_heads = getattr(attn, "num_key_value_heads", None) or getattr(config, "num_key_value_heads", old_num_heads)
-    old_num_kv_groups = getattr(attn, "num_key_value_groups", None) or (old_num_heads // max(old_num_kv_heads, 1))
+    old_num_kv_heads = getattr(attn, "num_key_value_heads", None) or getattr(
+        config, "num_key_value_heads", old_num_heads
+    )
+    old_num_kv_groups = getattr(attn, "num_key_value_groups", None) or (
+        old_num_heads // max(old_num_kv_heads, 1)
+    )
 
     old_head_map = state.head_map_by_layer[layer_orig_idx].clone()
 
@@ -597,7 +650,10 @@ def apply_head_prune(
     head_dim = old_head_map.head_dim
 
     remove_q_orig = set(
-        range(remove_group_orig_idx * group_size, (remove_group_orig_idx + 1) * group_size)
+        range(
+            remove_group_orig_idx * group_size,
+            (remove_group_orig_idx + 1) * group_size,
+        )
     )
     keep_q_positions = [i for i, idx in enumerate(q_orig) if idx not in remove_q_orig]
     keep_kv_positions = [
@@ -605,13 +661,41 @@ def apply_head_prune(
     ]
 
     with torch.no_grad():
-        q_w = old_q.weight[expand_positions(keep_q_positions, head_dim), :].detach().clone()
-        k_w = old_k.weight[expand_positions(keep_kv_positions, head_dim), :].detach().clone()
-        v_w = old_v.weight[expand_positions(keep_kv_positions, head_dim), :].detach().clone()
-        o_w = old_o.weight[:, expand_positions(keep_q_positions, head_dim)].detach().clone()
-        q_b = old_q.bias[expand_positions(keep_q_positions, head_dim)].detach().clone() if old_q.bias is not None else None
-        k_b = old_k.bias[expand_positions(keep_kv_positions, head_dim)].detach().clone() if old_k.bias is not None else None
-        v_b = old_v.bias[expand_positions(keep_kv_positions, head_dim)].detach().clone() if old_v.bias is not None else None
+        q_w = (
+            old_q.weight[expand_positions(keep_q_positions, head_dim), :]
+            .detach()
+            .clone()
+        )
+        k_w = (
+            old_k.weight[expand_positions(keep_kv_positions, head_dim), :]
+            .detach()
+            .clone()
+        )
+        v_w = (
+            old_v.weight[expand_positions(keep_kv_positions, head_dim), :]
+            .detach()
+            .clone()
+        )
+        o_w = (
+            old_o.weight[:, expand_positions(keep_q_positions, head_dim)]
+            .detach()
+            .clone()
+        )
+        q_b = (
+            old_q.bias[expand_positions(keep_q_positions, head_dim)].detach().clone()
+            if old_q.bias is not None
+            else None
+        )
+        k_b = (
+            old_k.bias[expand_positions(keep_kv_positions, head_dim)].detach().clone()
+            if old_k.bias is not None
+            else None
+        )
+        v_b = (
+            old_v.bias[expand_positions(keep_kv_positions, head_dim)].detach().clone()
+            if old_v.bias is not None
+            else None
+        )
         o_b = old_o.bias.detach().clone() if old_o.bias is not None else None
 
     attn.q_proj = replace_linear(old_q, q_w, q_b)
@@ -660,6 +744,7 @@ def apply_layer_drop(
     state: ModelState,
     layer_orig_idx: int,
 ) -> SurgeryUndo:
+    """Drop an entire transformer block and return an undo handle."""
     layers = get_decoder_layers(model)
     current_idx = state.layer_orig_indices.index(layer_orig_idx)
     removed_layer = layers[current_idx]
@@ -690,6 +775,7 @@ def apply_layer_drop(
 
 
 def expand_positions(positions: List[int], head_dim: int) -> List[int]:
+    """Expand head indices into contiguous projection indices."""
     expanded: List[int] = []
     for pos in positions:
         start = pos * head_dim
@@ -791,7 +877,9 @@ class PruningEngine:
         tau_target = max(floor_abs_target, tau_target)
         epsilon_target = self.base_epsilon * (1.0 + ADAPT_EPS_SCALE * aggression)
         pool_target = int(round(self.base_candidate_pool * (1.0 + ADAPT_POOL_SCALE * aggression)))
-        trials_target = int(round(self.base_max_stage_trials * (1.0 - ADAPT_STAGE_TRIALS_SCALE * aggression)))
+        trials_target = int(
+            round(self.base_max_stage_trials * (1.0 - ADAPT_STAGE_TRIALS_SCALE * aggression))
+        )
 
         changed = False
         if floor_abs_target < self.tau_floor_absolute:
@@ -833,7 +921,11 @@ class PruningEngine:
         print("PRUNING ENGINE INITIALIZED")
         print(f"  Initial parameters: {initial_params:,}")
         print(f"  Number of layers: {num_layers}")
-        print(f"  Calibration prompts: {len(self.prompts)} (train: {len(self.train_indices)}, holdout: {len(self.holdout_indices)})")
+        print(
+            "  Calibration prompts: "
+            f"{len(self.prompts)} (train: {len(self.train_indices)}, "
+            f"holdout: {len(self.holdout_indices)})"
+        )
         print(f"  Stage plan: {' -> '.join(self.config.stage_plan)}")
         print(f"  Similarity threshold (tau): {self.config.tau}")
         print(f"  Max iterations: {self.config.max_iters}")
@@ -849,7 +941,9 @@ class PruningEngine:
         self.tau_floor_absolute = self.baseline_score * TAU_FLOOR_REL
         print(f"Baseline score: {self.current_score:.4f}")
         print(
-            f"Effective tau: {self.tau_absolute:.4f} (relative={self.config.tau:.3f}, floor={self.tau_floor_absolute:.4f})\n"
+            "Effective tau: "
+            f"{self.tau_absolute:.4f} (relative={self.config.tau:.3f}, "
+            f"floor={self.tau_floor_absolute:.4f})\n"
         )
         log_event(
             {
@@ -867,18 +961,21 @@ class PruningEngine:
         for t in pbar:
             self.update_adaptive_controls(t, initial_params)
             stage = self.config.stage_plan[self.stage_idx]
-            pbar.set_postfix({
-                "stage": stage,
-                "score": f"{self.current_score:.3f}",
-                "accepted": len(self.accepted_ops),
-                "params": f"{count_parameters(self.generator.model)/1e9:.2f}B",
-                "tau": f"{self.tau_absolute:.3f}",
-            })
+            pbar.set_postfix(
+                {
+                    "stage": stage,
+                    "score": f"{self.current_score:.3f}",
+                    "accepted": len(self.accepted_ops),
+                    "params": f"{count_parameters(self.generator.model)/1e9:.2f}B",
+                    "tau": f"{self.tau_absolute:.3f}",
+                }
+            )
             self.stage_iters += 1
             if self.stage_iters >= STAGE_MAX_ITERS and len(self.config.stage_plan) > 1:
                 if self.stage_idx + 1 < len(self.config.stage_plan):
                     tqdm.write(
-                        f"\n[iter {t}] Stage '{stage}' reached {STAGE_MAX_ITERS} iterations, advancing."
+                        f"\n[iter {t}] Stage '{stage}' reached {STAGE_MAX_ITERS} "
+                        "iterations, advancing."
                     )
                     log_event(
                         {
@@ -898,7 +995,10 @@ class PruningEngine:
             candidates = self.build_candidates(stage)
             if not candidates:
                 if self.stage_idx + 1 < len(self.config.stage_plan):
-                    tqdm.write(f"\n[iter {t}] No candidates in stage '{stage}', advancing to next stage.")
+                    tqdm.write(
+                        f"\n[iter {t}] No candidates in stage '{stage}', "
+                        "advancing to next stage."
+                    )
                     log_event(
                         {
                             "event": "stage_advance",
@@ -937,7 +1037,8 @@ class PruningEngine:
                     holdout_score = self.score_subset(self.holdout_indices, desc="Holdout")
                     holdout_msg = f" | holdout={holdout_score:.4f}"
                 tqdm.write(
-                    f"  [iter {t}] ACCEPT {op.op_id()} | small={s_small:.4f} | full={s_full:.4f}{holdout_msg} | params={params_now:,}"
+                    f"  [iter {t}] ACCEPT {op.op_id()} | small={s_small:.4f} | "
+                    f"full={s_full:.4f}{holdout_msg} | params={params_now:,}"
                 )
                 log_event(
                     {
@@ -965,7 +1066,9 @@ class PruningEngine:
             else:
                 self.stage_failures += 1
                 tqdm.write(
-                    f"  [iter {t}] REJECT {op.op_id()} | small={s_small:.4f} | full={s_full:.4f} | failures={self.stage_failures}/{self.config.max_stage_trials}"
+                    f"  [iter {t}] REJECT {op.op_id()} | small={s_small:.4f} | "
+                    f"full={s_full:.4f} | failures={self.stage_failures}/"
+                    f"{self.config.max_stage_trials}"
                 )
                 log_event(
                     {
@@ -988,13 +1091,17 @@ class PruningEngine:
                 )
                 if self.stage_failures >= self.config.max_stage_trials:
                     if self.tau_absolute > self.tau_floor_absolute:
-                        new_tau = max(self.tau_floor_absolute, self.tau_absolute * TAU_DECAY)
+                        new_tau = max(
+                            self.tau_floor_absolute, self.tau_absolute * TAU_DECAY
+                        )
                         if new_tau < self.tau_absolute:
                             old_tau = self.tau_absolute
                             self.tau_absolute = new_tau
                             self.stage_failures = 0
                             tqdm.write(
-                                f"\n[iter {t}] Stage '{stage}' stalled. Lowering tau {old_tau:.4f} -> {self.tau_absolute:.4f} and retrying."
+                                f"\n[iter {t}] Stage '{stage}' stalled. Lowering "
+                                f"tau {old_tau:.4f} -> {self.tau_absolute:.4f} "
+                                "and retrying."
                             )
                             log_event(
                                 {
@@ -1009,7 +1116,8 @@ class PruningEngine:
                             continue
                     if self.stage_idx + 1 < len(self.config.stage_plan):
                         tqdm.write(
-                            f"\n[iter {t}] Stage '{stage}' stalled after {self.stage_failures} trials, advancing to next stage."
+                            f"\n[iter {t}] Stage '{stage}' stalled after "
+                            f"{self.stage_failures} trials, advancing to next stage."
                         )
                         log_event(
                             {
@@ -1032,7 +1140,9 @@ class PruningEngine:
         final_params = count_parameters(self.generator.model)
         compression = 1.0 - (final_params / initial_params)
         print("PRUNING COMPLETE")
-        print(f"  Final parameters: {final_params:,} ({compression*100:.1f}% reduction)")
+        print(
+            f"  Final parameters: {final_params:,} ({compression*100:.1f}% reduction)"
+        )
         print(f"  Final score: {self.current_score:.4f}")
         print(f"  Accepted operations: {len(self.accepted_ops)}")
         print(f"  Remaining layers: {len(self.state.layer_orig_indices)}")
@@ -1243,6 +1353,7 @@ class PruningEngine:
 
 
 def compute_group_importance(head_importance: Tensor, group_size: int) -> Tensor:
+    """Average head importances into key/value group importance scores."""
     num_heads = head_importance.shape[0]
     num_groups = num_heads // max(group_size, 1)
     groups = []
@@ -1261,9 +1372,12 @@ def select_mlp_keep(
     top_keep_frac: float,
     sample_band_frac: float,
 ) -> Tuple[List[int], List[int], float]:
+    """Select MLP neurons to keep with a top-k + sampling band strategy."""
     num_positions = len(current_orig)
     positions = list(range(num_positions))
-    ranked_positions = sorted(positions, key=lambda pos: float(importance[pos]), reverse=True)
+    ranked_positions = sorted(
+        positions, key=lambda pos: float(importance[pos]), reverse=True
+    )
     fixed = max(0, min(target_size, int(target_size * top_keep_frac)))
     remaining = max(0, target_size - fixed)
     fixed_keep_positions = ranked_positions[:fixed]
@@ -1279,7 +1393,9 @@ def select_mlp_keep(
             extra_needed = remaining - len(sampled_positions)
             tail_candidates = ranked_positions[band_end:]
             if extra_needed > 0 and tail_candidates:
-                sampled_positions.extend(rng.sample(tail_candidates, min(extra_needed, len(tail_candidates))))
+                sampled_positions.extend(
+                    rng.sample(tail_candidates, min(extra_needed, len(tail_candidates)))
+                )
         keep_positions_set = set(fixed_keep_positions + sampled_positions)
     else:
         keep_positions_set = set(fixed_keep_positions)
@@ -1301,6 +1417,7 @@ def sample_candidates(
     mu: Dict[str, float],
     bandit_weight: float,
 ) -> List[Operation]:
+    """Sample candidate operations using a temperature-weighted distribution."""
     if len(candidates) <= k:
         return candidates
     scores_list = []
@@ -1316,10 +1433,12 @@ def sample_candidates(
 
 
 def count_parameters(model: torch.nn.Module) -> int:
+    """Return the total number of parameters in a model."""
     return sum(p.numel() for p in model.parameters())
 
 
 def build_pruned_layer_info(state: ModelState) -> List[Dict[str, object]]:
+    """Summarize pruned layer dimensions for the recipe metadata."""
     layer_info: List[Dict[str, object]] = []
     for layer_orig_idx in state.layer_orig_indices:
         head_map = state.head_map_by_layer[layer_orig_idx]
@@ -1343,6 +1462,7 @@ def save_pruning_recipe(
     state: ModelState,
     final_score: float,
 ) -> None:
+    """Serialize pruning results so they can be re-applied later."""
     recipe = {
         "base_model": base_model_name,
         "final_score": final_score,
@@ -1369,6 +1489,7 @@ def save_pruning_recipe(
 def load_and_prune_model(
     recipe_path: str, device: str, dtype: torch.dtype
 ) -> Tuple[torch.nn.Module, AutoTokenizer]:
+    """Load a base model and apply a pruning recipe."""
     with open(recipe_path, "r", encoding="utf-8") as f:
         recipe = json.load(f)
 
@@ -1390,6 +1511,7 @@ def load_and_prune_model(
 
 
 def apply_pruning_recipe(model: torch.nn.Module, recipe: Dict[str, object]) -> None:
+    """Apply a pruning recipe directly to an in-memory model."""
     state = ModelState.from_model(model)
     keep_layer_indices = [int(x) for x in recipe["keep_layer_indices"]]
     mlp_by_layer = {int(k): v for k, v in recipe["keep_mlp_indices_by_layer"].items()}
@@ -1425,7 +1547,10 @@ def apply_pruning_recipe(model: torch.nn.Module, recipe: Dict[str, object]) -> N
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Structured pruning with embedding similarity.")
+    """Build CLI for pruning configuration."""
+    parser = argparse.ArgumentParser(
+        description="Structured pruning with embedding similarity."
+    )
     parser.add_argument(
         "--model",
         type=str,
@@ -1448,8 +1573,14 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="system_prompt_deep_learning.txt",
     )
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--embed-device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu"
+    )
+    parser.add_argument(
+        "--embed-device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "cpu",
+    )
     parser.add_argument("--dtype", type=str, default="bfloat16")
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--embed-batch-size", type=int, default=8)
@@ -1478,18 +1609,32 @@ def parse_args() -> argparse.Namespace:
         default="mlp,head,mlp,layer",
         help="Comma-separated stages.",
     )
-    parser.add_argument("--save-recipe", type=str, default="", help="Path to save pruning recipe JSON.")
-    parser.add_argument("--load-recipe", type=str, default="", help="Path to load pruning recipe JSON and apply it.")
+    parser.add_argument(
+        "--save-recipe",
+        type=str,
+        default="",
+        help="Path to save pruning recipe JSON.",
+    )
+    parser.add_argument(
+        "--load-recipe",
+        type=str,
+        default="",
+        help="Path to load pruning recipe JSON and apply it.",
+    )
     parser.add_argument(
         "--embedding-task",
         type=str,
-        default="Given a candidate answer, retrieve the reference answer that is semantically equivalent",
+        default=(
+            "Given a candidate answer, retrieve the reference answer that is "
+            "semantically equivalent"
+        ),
         help="Task instruction for query embeddings (candidate outputs).",
     )
     return parser.parse_args()
 
 
 def resolve_dtype(name: str) -> torch.dtype:
+    """Map a string dtype name to a torch dtype."""
     name = name.lower().strip()
     if name == "float16":
         return torch.float16
@@ -1499,6 +1644,7 @@ def resolve_dtype(name: str) -> torch.dtype:
 
 
 def main() -> None:
+    """Run the end-to-end pruning pipeline."""
     args = parse_args()
     set_seed(args.seed)
 
@@ -1512,7 +1658,8 @@ def main() -> None:
     if args.load_recipe:
         model, tokenizer = load_and_prune_model(args.load_recipe, args.device, dtype)
         print(
-            f"Loaded and pruned model from recipe {args.load_recipe} with {count_parameters(model):,} parameters."
+            f"Loaded and pruned model from recipe {args.load_recipe} with "
+            f"{count_parameters(model):,} parameters."
         )
         return
 
@@ -1555,14 +1702,19 @@ def main() -> None:
     print(f"      Generated {len(teacher_outputs)} outputs.\n")
 
     print("[3/4] Loading embedding model and encoding teacher outputs...")
-    embed_task = args.embedding_task.strip() or "Given a candidate answer, retrieve the reference answer that is semantically equivalent"
+    embed_task = args.embedding_task.strip() or (
+        "Given a candidate answer, retrieve the reference answer that is semantically "
+        "equivalent"
+    )
     embedder = EmbeddingScorer(
         model_name=args.embed_model,
         device=args.embed_device,
         batch_size=args.embed_batch_size,
         task_description=embed_task,
     )
-    teacher_embeddings = embedder.encode(teacher_outputs, as_query=False, desc="Encoding teacher")
+    teacher_embeddings = embedder.encode(
+        teacher_outputs, as_query=False, desc="Encoding teacher"
+    )
     print(f"      Encoded {len(teacher_embeddings)} embeddings.\n")
 
     state = ModelState.from_model(generator.model)
